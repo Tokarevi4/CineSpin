@@ -10,6 +10,8 @@ from PySide6.QtGui import QColor, QPainter, QFont, QPen, QPolygon, QPixmap
 import requests
 from bs4 import BeautifulSoup
 
+BACKEND_URL = "https://cinespin-api.maxim-tokaref.workers.dev/movie"
+
 # 🎡 КАСТОМНЫЙ ВИДЖЕТ КОЛЕСА ФОРТУНЫ
 class WheelWidget(QWidget):
     animation_finished = Signal(str)
@@ -388,22 +390,16 @@ class MainWindow(QMainWindow):
             print("Название фильма пустое.")
             return None
 
-        # В разработке:
-        backend_url = "http://127.0.0.1:8000/movie"
-
-        # После публикации:
-        # backend_url = "https://your-cinespin-api.example.com/movie"
-
         params = {
             "title": clean_title,
         }
 
         try:
-            # Запрашиваем данные у нашего backend
+            # Запрашиваем информацию о фильме через Cloudflare Worker
             response = requests.get(
-                backend_url,
+                BACKEND_URL,
                 params=params,
-                timeout=7,
+                timeout=10,
             )
 
             print(f"CineSpin API status: {response.status_code}")
@@ -426,7 +422,7 @@ class MainWindow(QMainWindow):
             # Загружаем непосредственно изображение
             image_response = requests.get(
                 poster_url,
-                timeout=7,
+                timeout=10,
             )
 
             image_response.raise_for_status()
