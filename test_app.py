@@ -5,7 +5,7 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget,
                                QVBoxLayout, QHBoxLayout, QLineEdit, 
                                QPushButton, QGroupBox, QListWidget, QMessageBox)
 from PySide6.QtCore import Qt, QSize, QThread, Signal, QObject, Property, QPropertyAnimation, QEasingCurve, QPoint
-from PySide6.QtGui import QColor, QPainter, QFont, QPen, QPolygon
+from PySide6.QtGui import QColor, QPainter, QFont, QPen, QPolygon, QPixmap
 
 import requests
 from bs4 import BeautifulSoup
@@ -203,14 +203,11 @@ class WatchlistWorker(QObject):
         page = 1
 
         while True:
-            # Формируем URL для текущей страницы
+            # 📌 Безопасная сборка ссылки обычным сложением строк без urljoin
             if page == 1:
-                url = urljoin(base_url, f"{self.username}/watchlist/")
+                url = f"https://letterboxd.com{self.username}/watchlist/"
             else:
-                url = urljoin(base_url, f"{self.username}/watchlist/page/{page}/")
-
-            self.progress.emit(f"Загрузка страницы {page}...")
-
+                url = f"https://letterboxd.com{self.username}/watchlist/page/{page}/"
             try:
                 response = requests.get(url, headers=headers, timeout=10)
                 

@@ -1,5 +1,4 @@
 > This project was vibecoded and is not an official Letterboxd app.
-
 # CineSpin
 
 An open-source cross-platform desktop application built with **Python** and **PySide6 (Qt)** that syncs with your **Letterboxd** profile, scrapes your watchlist asynchronously, and spins a beautifully rendered custom fortune wheel to pick a random movie for your evening.
