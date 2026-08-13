@@ -5,7 +5,7 @@ import random
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, 
                                QVBoxLayout, QHBoxLayout, QLineEdit, 
                                QPushButton, QGroupBox, QListWidget, QMessageBox,
-                               QLabel, QSlider)
+                               QLabel, QSlider, QTabWidget)
 from PySide6.QtCore import Qt, QSize, QThread, Signal, QObject, Property, QPropertyAnimation, QEasingCurve, QPoint, QRect, QMimeData
 from PySide6.QtGui import QColor, QPainter, QFont, QPen, QPolygon, QPixmap, QFontMetrics, QDrag
 
@@ -450,38 +450,75 @@ class MainWindow(QMainWindow):
         manual_layout.addWidget(self.movie_input)
         manual_layout.addWidget(self.add_manual_btn)
         
+        # --- ИМПОРТ ИЗ LETTERBOXD (ВКЛАДКИ) ---
         parser_group = QGroupBox("Импорт из Letterboxd")
-        parser_layout = QVBoxLayout(parser_group)
-        self.username_input = QLineEdit()
-        self.username_input.setPlaceholderText("Никнейм пользователя...")
-        self.parse_btn = QPushButton("Загрузить вотчлист")
-        parser_layout.addWidget(self.username_input)
-        parser_layout.addWidget(self.parse_btn)
+        parser_group_layout = QVBoxLayout(parser_group)
+        parser_group_layout.setContentsMargins(5, 10, 5, 5)
         
-        list_group = QGroupBox("Фильмы в рулетке")
-        list_layout = QVBoxLayout(list_group)
-
-        self.movies_list = DragListWidget()
-
-        # НОВАЯ ФИЧА: Поле динамического поиска
-        self.search_input = QLineEdit()
-        self.search_input.setPlaceholderText("Поиск по вотчлисту...")
-        self.search_input.setStyleSheet("""
-            QLineEdit { 
-                background-color: #1c252d; 
+        # Создаем виджет вкладок
+        self.import_tabs = QTabWidget()
+        self.import_tabs.setStyleSheet("""
+            QTabWidget::panel { 
+                border: 1px solid #2c3440; 
+                background-color: #14181c; /* Цвет панели подложки */
+            }
+            QWidget {
+                background-color: #14181c; /* Принудительный цвет для содержимого вкладок */
+            }
+            QTabWidget::tab-bar { 
+                left: 5px; 
+            }
+            QTabBar::tab { 
+                background: #2c3440; 
+                color: #9ab; 
+                font-weight: bold; 
+                padding: 6px 12px; 
+                border-top-left-radius: 4px; 
+                border-top-right-radius: 4px; 
+            }
+            QTabBar::tab:selected { 
+                background: #445566; 
                 color: #fff; 
-                border: 1px solid #445566; 
-                border-radius: 4px; 
-                padding: 5px; 
-                margin-top: 5px; 
-                margin-bottom: 5px; 
+            }
+            QTabBar::tab:hover { 
+                background: #354352; 
             }
         """)
-
+        
+        # Вкладка 1: Одиночный режим
+        single_tab = QWidget()
+        single_layout = QVBoxLayout(single_tab)
+        single_layout.setContentsMargins(10, 10, 10, 10)
+        self.username_input = QLineEdit()
+        self.username_input.setPlaceholderText("Никнейм пользователя...")
+        single_layout.addWidget(self.username_input)
+        
+        # Вкладка 2: Мультиплеер (Пересечение)
+        multi_tab = QWidget()
+        multi_layout = QVBoxLayout(multi_tab)
+        multi_layout.setContentsMargins(10, 10, 10, 10)
+        self.multi_username_input = QLineEdit()
+        self.multi_username_input.setPlaceholderText("Никнеймы через запятую (user1, user2)...")
+        multi_layout.addWidget(self.multi_username_input)
+        
+        # Добавляем вкладки в QTabWidget
+        self.import_tabs.addTab(single_tab, "Один")
+        self.import_tabs.addTab(multi_tab, "Несколько")
+        
+        # Общая кнопка загрузки под вкладками
+        self.parse_btn = QPushButton("Загрузить вотчлист")
+        
+        parser_group_layout.addWidget(self.import_tabs)
+        parser_group_layout.addWidget(self.parse_btn)
+        
+        # Блок списка
+        list_group = QGroupBox("Фильмы в рулетке")
+        list_layout = QVBoxLayout(list_group)
+        self.movies_list = DragListWidget()
+        self.search_input = QLineEdit()
+        self.search_input.setPlaceholderText("Поиск по вотчлисту...")
         self.spin_btn = QPushButton("КРУТИТЬ КОЛЕСО")
-        self.spin_btn.setStyleSheet("background-color: #00c030; color: white; font-weight: bold; font-size: 14px; padding: 8px;")
-
-        # Располагаем строго по вашей логике: поиск находится между списком и кнопкой
+        
         list_layout.addWidget(self.movies_list)
         list_layout.addWidget(self.search_input) 
         list_layout.addWidget(self.spin_btn)
@@ -699,37 +736,104 @@ class MainWindow(QMainWindow):
 
     # 🛠 ЗАПУСК ФОНОВОГО ПОТОКА ДЛЯ ПАРСИНГА
     def start_async_parsing(self):
-        username = self.username_input.text().strip()
-        if not username:
-            QMessageBox.warning(self, "Внимание", "Введите никнейм пользователя!")
-            return
+        # Проверяем, какая вкладка активна: 0 - Соло, 1 - Кооператив
+        current_tab_index = self.import_tabs.currentIndex()
         
-        # 1. Меняем состояние и стиль кнопки перед стартом потока
+        if current_tab_index == 0:
+            # --- ЛОГИКА СОЛО РЕЖИМА ---
+            username = self.username_input.text().strip()
+            if not username:
+                QMessageBox.warning(self, "Внимание", "Введите никнейм пользователя!")
+                return
+            self.users_to_parse = [username]
+        else:
+            # --- ЛОГИКА КООПЕРАТИВА ---
+            raw_input = self.multi_username_input.text().strip()
+            if not raw_input:
+                QMessageBox.warning(self, "Внимание", "Введите никнеймы через запятую!")
+                return
+            # Разделяем строку по запятым, убираем пробелы и пустые элементы
+            self.users_to_parse = [u.strip() for u in raw_input.split(",") if u.strip()]
+            if len(self.users_to_parse) < 2:
+                QMessageBox.warning(self, "Внимание", "Для кооператива нужно минимум 2 пользователя!")
+                return
+
+        # Хранилище для накопления результатов
+        self.multi_parsed_results = []
+        self.current_user_index = 0
+        
+        # Меняем визуальное состояние кнопки
         self.parse_btn.setEnabled(False)
-        self.parse_btn.setText("Инициализация...")
-        # Делаем кнопку серой, убираем эффект наведения (hover) на время загрузки
-        self.parse_btn.setStyleSheet("""
-            QPushButton { background-color: #2c3440; color: #556677; border: 1px solid #445566; }
-        """)
-
-        # Создаем поток и объект-воркер
-        self.thread = QThread()
-        self.worker = WatchlistWorker(username)
-        self.worker.moveToThread(self.thread)
-
-        # Связываем сигналы воркера с методами интерфейса главного окна
-        self.thread.started.connect(self.worker.run)
-        self.worker.progress.connect(self.update_parse_button_status)
-        self.worker.error.connect(self.handle_parse_error)
-        self.worker.finished.connect(self.handle_parse_success)
+        self.parse_btn.setStyleSheet("background-color: #2c3440; color: #556677; font-weight: bold;")
         
-        # Гарантируем очистку памяти после завершения потока
-        self.worker.finished.connect(self.thread.quit)
-        self.worker.finished.connect(self.worker.deleteLater)
-        self.thread.finished.connect(self.thread.deleteLater)
+        # Запускаем цепочку скачивания
+        self.parse_next_user()
 
-        # Стартуем поток
-        self.thread.start()
+    def parse_next_user(self):
+        """Вспомогательный метод для асинхронного скачивания пользователей по очереди"""
+        if self.current_user_index < len(self.users_to_parse):
+            target_user = self.users_to_parse[self.current_user_index]
+            self.parse_btn.setText(f"Скачивание {target_user}...")
+            
+            # Создаем поток и воркер
+            self.thread = QThread()
+            self.worker = WatchlistWorker(target_user)
+            self.worker.moveToThread(self.thread)
+
+            self.thread.started.connect(self.worker.run)
+            self.worker.progress.connect(self.update_parse_button_status)
+            self.worker.error.connect(self.handle_parse_error)
+            
+            # 1. Сначала сохраняем результат воркера в память
+            self.worker.finished.connect(self.handle_single_user_success)
+            
+            # 2. По окончании работы воркер командует потоку закрыться
+            self.worker.finished.connect(self.thread.quit)
+            self.worker.finished.connect(self.worker.deleteLater)
+            
+            # 3. КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Переходим к следующему юзеру ТОЛЬКО когда 
+            # предыдущий системный поток ПОЛНОСТЬЮ закрылся и очистил память!
+            self.thread.finished.connect(self.on_current_thread_fully_stopped)
+            self.thread.finished.connect(self.thread.deleteLater)
+
+            self.thread.start()
+        else:
+            # Все пользователи успешно скачаны и все потоки закрыты
+            self.finalize_multiplayer_intersection()
+
+    def on_current_thread_fully_stopped(self):
+        """Срабатывает, когда старый QThread полностью уничтожен операционной системой"""
+        # Переходим к следующему индексу и безопасно создаем НОВЫЙ поток
+        self.current_user_index += 1
+        self.parse_next_user()
+
+
+    def handle_single_user_success(self, movies_found):
+        """Вызывается, когда воркер закончил парсить текущего пользователя"""
+        # Сохраняем результат в виде множества
+        self.multi_parsed_results.append(set(movies_found))
+        # Больше здесь ничего делать не нужно — закрытие потока само запустит следующего юзера
+
+
+    def finalize_multiplayer_intersection(self):
+        """Финальный метод: пересекает все вотчлисты по принципу логического И"""
+        if not self.multi_parsed_results:
+            self.reset_parse_button()
+            return
+            
+        # ИСПРАВЛЕНО: Явно берем копию множества первого пользователя (.copy())
+        intersection_set = self.multi_parsed_results[0].copy()
+        
+        # Пересекаем со всеми остальными пользователями
+        for user_set in self.multi_parsed_results[1:]:
+            intersection_set = intersection_set & user_set
+            
+        final_movies = sorted(list(intersection_set))
+        
+        # Выгружаем результат
+        self.handle_parse_success(final_movies)
+
+
 
     def update_parse_button_status(self, text):
         # Метод будет выводить динамический статус из воркера (например: "Загрузка: стр. 1")
@@ -738,60 +842,58 @@ class MainWindow(QMainWindow):
     def handle_parse_error(self, error_msg):
         QMessageBox.critical(self, "Ошибка загрузки", error_msg)
         self.reset_parse_button()
-        # Поток безопасно завершится сам благодаря коннектам в start_async_parsing,
-        # но при ошибке принудительно гасим его, если finished не вызвался
-        if self.thread.isRunning():
+        
+        # Гасим текущий запущенный поток, если он активен
+        if hasattr(self, 'thread') and self.thread.isRunning():
             self.thread.quit()
 
+
     def handle_parse_success(self, movies_found):
-        # 1. Сразу полностью очищаем левый список на экране
         self.search_input.clear() 
         self.movies_list.clear()
         
         if movies_found:
-            # Настраиваем максимальный диапазон ползунка под размер нового вотчлиста (но до 50)
+            # 1. Рассчитываем реальный максимум для ползунка под этот список
             max_available = min(50, len(movies_found))
-            self.size_slider.setRange(0, max_available)
             
-            # Определяем начальное значение ползунка
+            # 2. Выставляем начальное значение (12 или сколько доступно)
             start_val = min(12, max_available)
             
-            # Временно блокируем сигналы, чтобы избежать двойного вызова тяжелой отрисовки
+            # ВАЖНО: Принудительно выставляем новый лимит в само колесо ДО того, 
+            # как дернем ползунок, чтобы колесо не зажималось старыми лимитами!
+            self.wheel_area.max_lots_limit = start_val
+            self.wheel_area.wheel_buffer = None
+            
+            # 3. Синхронизируем ползунок (блокируем сигналы, чтобы избежать каскадных перезаписей)
             self.size_slider.blockSignals(True)
+            self.size_slider.setRange(0, max_available)
             self.size_slider.setValue(start_val)
             self.size_label.setText(f"Слотов на колесе: {start_val}")
             self.size_slider.setEnabled(True)
             self.size_slider.blockSignals(False)
             
-            # Устанавливаем лимит лотов для колеса
-            self.wheel_area.max_lots_limit = start_val
-            
-            # КРИТИЧЕСКИЙ МОМЕНТ: Принудительно сбрасываем старый графический кэш колеса в None!
-            self.wheel_area.wheel_buffer = None
-            
-            # Передаем новый список фильмов в колесо (оно заново отрендерит QPixmap буфер)
-            self.wheel_area.set_movies(movies_found)
-            
-            # Добавляем в левый текстовый список ВСЕ найденные фильмы нового пользователя
+            # 4. Заполняем левый список всеми найденными фильмами
             self.movies_list.addItems(movies_found) 
             
-            QMessageBox.information(self, "Готово", f"Колесо заряжено!\nВсего загружено: {len(movies_found)}")
+            # 5. Заряжаем колесо (теперь оно возьмет ровно start_val случайных фильмов из всего пула)
+            self.wheel_area.set_movies(movies_found)
+            
+            QMessageBox.information(self, "Готово", f"Колесо заряжено!\nВсего пересечений (И): {len(movies_found)}")
         else:
-            # Если вотчлист пуст, полностью обнуляем колесо
             self.wheel_area.max_lots_limit = 0
             self.wheel_area.wheel_buffer = None
             self.wheel_area.set_movies([])
             
+            self.size_slider.blockSignals(True)
             self.size_slider.setRange(0, 0)
             self.size_slider.setValue(0)
             self.size_label.setText("Слотов на колесе: 0")
             self.size_slider.setEnabled(False)
+            self.size_slider.blockSignals(False)
             
-            QMessageBox.information(self, "Информация", "Вотчлист пуст.")
+            QMessageBox.information(self, "Информация", "Общих фильмов не найдено.")
             
         self.reset_parse_button()
-
-
 
     def reset_parse_button(self):
         # 2. Возвращаем кнопке её исходный текст, состояние и дефолтный стиль
