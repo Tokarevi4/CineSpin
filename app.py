@@ -456,6 +456,7 @@ class MainWindow(QMainWindow):
         parser_group_layout.setContentsMargins(5, 10, 5, 5)
         
         # Создаем виджет вкладок
+        # Создаем виджет вкладок с исправленными цветами фона
         self.import_tabs = QTabWidget()
         self.import_tabs.setStyleSheet("""
             QTabWidget::panel { 
@@ -484,6 +485,7 @@ class MainWindow(QMainWindow):
                 background: #354352; 
             }
         """)
+
         
         # Вкладка 1: Одиночный режим
         single_tab = QWidget()
