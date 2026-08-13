@@ -1,33 +1,182 @@
 import sys  
+import math
 import requests
 import random
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, 
                                QVBoxLayout, QHBoxLayout, QLineEdit, 
-                               QPushButton, QGroupBox, QListWidget, QMessageBox)
-from PySide6.QtCore import Qt, QSize, QThread, Signal, QObject, Property, QPropertyAnimation, QEasingCurve, QPoint
-from PySide6.QtGui import QColor, QPainter, QFont, QPen, QPolygon, QPixmap
+                               QPushButton, QGroupBox, QListWidget, QMessageBox,
+                               QLabel, QSlider)
+from PySide6.QtCore import Qt, QSize, QThread, Signal, QObject, Property, QPropertyAnimation, QEasingCurve, QPoint, QRect, QMimeData
+from PySide6.QtGui import QColor, QPainter, QFont, QPen, QPolygon, QPixmap, QFontMetrics, QDrag
 
 import requests
 from bs4 import BeautifulSoup
 
 BACKEND_URL = "https://cinespin-api.maxim-tokaref.workers.dev/movie"
 
+class DragListWidget(QListWidget):
+    """Кастомный список, который отдает чистый текст при Drag'n'Drop"""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setDragEnabled(True)
+        self.setDragDropMode(QListWidget.DragDropMode.DragOnly)
+
+    def startDrag(self, supportedActions):
+        # Получаем выделенный элемент списка
+        item = self.currentItem()
+        if not item:
+            return
+
+        # Создаем контейнер данных и принудительно пишем туда название фильма как чистый текст
+        mime_data = QMimeData()
+        mime_data.setText(item.text())
+
+        # Создаем системный объект перетаскивания
+        drag = QDrag(self)
+        drag.setMimeData(mime_data)
+        
+        # Запускаем перетаскивание
+        drag.exec(supportedActions)
+
 # 🎡 КАСТОМНЫЙ ВИДЖЕТ КОЛЕСА ФОРТУНЫ
 class WheelWidget(QWidget):
     animation_finished = Signal(str)
+    # Сигнал для уведомления GUI о том, что пул изменился (например, обновить счетчики на экране)
+    pool_changed = Signal(int) 
 
     def __init__(self):
         super().__init__()
         self.setMinimumSize(QSize(450, 450))
         self._rotation_angle = 0.0
-        self.movies = []      # Полный список фильмов пользователя
-        self.current_slots = [] # 12 фильмов, выбранных для текущего колеса
+        self.movies = []
+        self.current_slots = []
+        self.spin_duration = 4500
+        self.max_lots_limit = 50
+        
+        # Переменная для хранения отрендеренного статичного диска колеса
+        self.wheel_buffer = None 
         
         self.colors = [
-            QColor("#ff0043"), QColor("#00e5ff"), QColor("#ff00c8"),
-            QColor("#00c030"), QColor("#ffaa00"), QColor("#7000ff"),
-            QColor("#00ffd5"), QColor("#9dff00"), QColor("#ff5500")
+            QColor("#b3002f"), QColor("#0099aa"), QColor("#b3008c"),
+            QColor("#008020"), QColor("#b37700"), QColor("#4c00b3"),
+            QColor("#00b395"), QColor("#6eb300"), QColor("#b33c00")
         ]
+
+        self.setAcceptDrops(True)
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasText():
+            event.acceptProposedAction()
+
+    def dragMoveEvent(self, event):
+        if event.mimeData().hasText():
+            event.acceptProposedAction()
+
+    def dropEvent(self, event):
+        if event.mimeData().hasText():
+            movie_title = event.mimeData().text()
+            if self.add_slot_manually(movie_title):
+                event.acceptProposedAction()
+
+
+
+    def render_wheel_to_buffer(self):
+        """Метод полностью отрисовывает диск колеса с текстом в картинку ОДИН раз"""
+        rect = self.rect()
+        size = min(rect.width(), rect.height()) - 60
+        if size <= 0: size = 450
+        
+        from PySide6.QtGui import QPixmap, QPainterPath, QTransform
+        import math
+        
+        self.wheel_buffer = QPixmap(size, size)
+        self.wheel_buffer.fill(Qt.GlobalColor.transparent)
+        
+        painter = QPainter(self.wheel_buffer)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+        
+        display_count = len(self.current_slots)
+        if display_count == 0:
+            painter.end()
+            return
+            
+        span_angle = 360.0 / display_count
+        buffer_rect = QRect(0, 0, size, size)
+        
+        cx = size // 2
+        cy = size // 2
+
+        # 1. Рисуем цветные секторы в буфер
+        for i in range(display_count):
+            painter.setBrush(self.colors[i % len(self.colors)])
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.drawPie(buffer_rect, int(i * span_angle * 16), int(span_angle * 16))
+
+        # 2. Рисуем адаптивный текст в буфер без save/restore
+        for i in range(display_count):
+            text = self.current_slots[i]
+            target_font_size = max(6, min(12, int(size / 38)))
+            
+            min_distance_from_center = int(size * 0.18)
+            max_text_width = int((size / 2) * 0.68)
+            mid_radius = min_distance_from_center + (max_text_width / 2)
+            sector_width_at_mid = 2 * mid_radius * math.sin(math.radians(span_angle / 2))
+            
+            font = QFont("Arial", target_font_size, QFont.Weight.Bold)
+            metrics = QFontMetrics(font)
+            
+            while target_font_size > 6:
+                if metrics.horizontalAdvance(text) <= max_text_width and metrics.height() * 1.2 <= sector_width_at_mid:
+                    break
+                target_font_size -= 1
+                font = QFont("Arial", target_font_size, QFont.Weight.Bold)
+                metrics = QFontMetrics(font)
+                
+            if metrics.horizontalAdvance(text) > max_text_width:
+                text = metrics.elidedText(text, Qt.TextElideMode.ElideRight, max_text_width)
+                
+            current_font_metrics = QFontMetrics(font)
+            text_y_offset = current_font_metrics.capHeight() // 2
+            adaptive_pen_width = max(0.8, target_font_size * 0.13)
+            
+            # --- БЕЗОПАСНАЯ МАТРИЦА ВМЕСТО SAVE/RESTORE ---
+            # Создаем чистую матрицу трансформации для конкретной надписи
+            transform = QTransform()
+            transform.translate(cx, cy)
+            transform.rotate(i * span_angle + span_angle / 2)
+            painter.setTransform(transform) # Применяем матрицу напрямую
+            
+            painter.setFont(font)
+            
+            path = QPainterPath()
+            path.addText(min_distance_from_center, text_y_offset, font, text)
+            
+            pen = QPen(QColor("#14181c"), adaptive_pen_width)
+            pen.setStyle(Qt.PenStyle.SolidLine)
+            pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+            painter.setPen(pen)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawPath(path)
+            
+            painter.setPen(QColor("#ffffff"))
+            painter.drawText(min_distance_from_center, text_y_offset, text)
+            
+        # Сбрасываем трансформацию художника в дефолт перед закрытием
+        painter.setTransform(QTransform())
+        painter.end()
+
+
+    def handle_quick_delete(self, item):
+        """Хендлер быстрого удаления фильма по двойному клику"""
+        movie_title = item.text()
+        
+        # Удаляем фильм из пула самого колеса (оно внутри перерисуется)
+        self.wheel_widget.remove_slot_by_title(movie_title)
+        
+        # Удаляем элемент из визуального списка QListWidget на экране
+        row = self.movie_list_widget.row(item)
+        self.movie_list_widget.takeItem(row)
 
     @Property(float)
     def rotation_angle(self):
@@ -39,100 +188,121 @@ class WheelWidget(QWidget):
         self.update()
 
     def set_movies(self, movies_list):
-        self.movies = movies_list
+        """Инициализация списка при изменении ползунка или импорте"""
+        self.movies = list(movies_list)
         self._rotation_angle = 0.0
         
-        # Если фильмов много, берем случайные 12 штук, чтобы заполнить КОЛЕСО ПОЛНОСТЬЮ
-        if len(self.movies) > 12:
-            self.current_slots = random.sample(self.movies, 12)
+        if self.max_lots_limit == 0:
+            self.current_slots = []
+        elif len(self.movies) > self.max_lots_limit:
+            self.current_slots = random.sample(self.movies, self.max_lots_limit)
         else:
             self.current_slots = list(self.movies)
+
+        # СБРАСЫВАЕМ КЭШ: Это заставит paintEvent перерисовать колесо под нового пользователя
+        self.wheel_buffer = None 
+        self.update()            
+        self.pool_changed.emit(len(self.current_slots))
+
+
+
+    def set_spin_duration(self, seconds: float):
+        """Динамическая настройка времени вращения (вплоть до 60 секунд)"""
+        # Переводим секунды в миллисекунды для QPropertyAnimation
+        self.spin_duration = int(max(1.0, min(60.0, seconds)) * 1000)
+
+    def remove_slot_by_title(self, title: str) -> bool:
+        """Удаляет конкретный фильм из текущих слотов колеса"""
+        if title in self.current_slots:
+            self.current_slots.remove(title)
             
-        self.update()
+            # Если фильм удален вообще из программы, уберем его и из глобального списка
+            if title in self.movies:
+                self.movies.remove(title)
+                
+            self._rotation_angle = 0.0 # Сбрасываем угол
+            self.wheel_buffer = None
+            self.update()              # Принудительно вызываем paintEvent для перерисовки секторов
+            self.pool_changed.emit(len(self.current_slots))
+            return True
+        return False
+
+
+    def add_slot_manually(self, title: str) -> bool:
+        """Добавляет фильм в пул колеса вручную при Drag'n'Drop"""
+        # Если ползунок на нуле (колесо пустое), разрешаем добавить первый сектор
+        if self.max_lots_limit == 0:
+            self.max_lots_limit = 1
+            
+        # Если мы пытаемся добавить больше лотов, чем сейчас выставлено на ползунке
+        if len(self.current_slots) >= self.max_lots_limit:
+            if self.max_lots_limit < 50:
+                self.max_lots_limit += 1 # Автоматически раздвигаем лимит на +1 (до 50)
+            else:
+                return False # Жесткий лимит колеса в 50 лотов превышен
+            
+        if title not in self.current_slots:
+            self.current_slots.append(title)
+            if title not in self.movies:
+                self.movies.append(title)
+            
+            self._rotation_angle = 0.0
+            self.wheel_buffer = None # СБРАСЫВАЕМ КЭШ-КАРТИНКУ, чтобы она перерисовалась
+            self.update()
+            
+            # Отправляем сигнал главному окну, что размер пула изменился
+            self.pool_changed.emit(len(self.current_slots))
+            return True
+        return False
+
+
+    def resizeEvent(self, event):
+        self.wheel_buffer = None
+        super().resizeEvent(event)
+
 
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
         
         rect = self.rect()
-        size = min(rect.width(), rect.height()) - 60
         center_x = rect.width() // 2
         center_y = rect.height() // 2
+        size = min(rect.width(), rect.height()) - 60
 
         # Очистка фона
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor("#14181c"))
-        painter.drawRect(rect)
+        painter.fillRect(rect, QColor("#14181c"))
 
         if not self.current_slots:
             painter.setPen(QColor("#9ab"))
             painter.setFont(QFont("Arial", 13, QFont.Weight.Bold))
-            painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, "Загрузите вотчлист\nили добавьте фильмы вручную")
+            painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, "Колесо пусто.\nДобавьте лоты!")
             return
 
-        display_count = len(self.current_slots)
-        span_angle = 360.0 / display_count
+        if self.wheel_buffer is None:
+            self.render_wheel_to_buffer()
 
-        painter.save()
-        painter.translate(center_x, center_y)
-        painter.rotate(self._rotation_angle)
+        # --- КРУЧЕНИЕ КОЛЕСА ЧЕРЕЗ МАТРИЦУ (БЕЗ SAVE/RESTORE) ---
+        from PySide6.QtGui import QTransform
+        
+        wheel_transform = QTransform()
+        wheel_transform.translate(center_x, center_y)
+        wheel_transform.rotate(self._rotation_angle)
+        painter.setTransform(wheel_transform)
+        
+        if self.wheel_buffer:
+            painter.drawPixmap(-size // 2, -size // 2, self.wheel_buffer)
+            
+        # Важно! Сбрасываем матрицу обратно в дефолт, чтобы ось и стрелка рисовали на исходных местах
+        painter.setTransform(QTransform())
 
-        from PySide6.QtCore import QRect
-        wheel_rect = QPoint(-size // 2, -size // 2)
-        wheel_size = QSize(size, size)
-        target_rect = QRect(wheel_rect, wheel_size)
-
-        # 1. Рисуем цветные секторы
-        for i in range(display_count):
-            painter.setBrush(self.colors[i % len(self.colors)])
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.drawPie(target_rect, int(i * span_angle * 16), int(span_angle * 16))
-
-        # 2. Рисуем адаптивный текст
-        from PySide6.QtGui import QFontMetrics
-        for i in range(display_count):
-            painter.save()
-            painter.rotate(i * span_angle + span_angle / 2)
-            
-            painter.setPen(QColor("#ffffff"))
-            
-            # Начальный (максимальный) размер шрифта в зависимости от масштаба колеса
-            target_font_size = max(9, min(13, int(size / 32))) 
-            text = self.current_slots[i]
-            
-            # Доступное место под текст (примерно 65% от радиуса, чтобы не вылезать за край)
-            max_text_width = int((size / 2) * 0.65)
-            
-            # Цикл динамического уменьшения шрифта
-            font = QFont("Arial", target_font_size, QFont.Weight.Bold)
-            metrics = QFontMetrics(font)
-            
-            # Уменьшаем размер шрифта, пока текст не влезет или пока шрифт не станет минимальным (8)
-            while metrics.horizontalAdvance(text) > max_text_width and target_font_size > 8:
-                target_font_size -= 1
-                font = QFont("Arial", target_font_size, QFont.Weight.Bold)
-                metrics = QFontMetrics(font)
-            
-            # Если текст всё равно слишком длинный для минимального шрифта, красиво обрезаем его (добавляем ...)
-            if metrics.horizontalAdvance(text) > max_text_width:
-                text = metrics.elidedText(text, Qt.TextElideMode.ElideRight, max_text_width)
-                
-            painter.setFont(font)
-            
-            # Рисуем текст с безопасным отступом от центра
-            current_font_size = painter.font().pointSize()
-            painter.drawText(int(size * 0.16), current_font_size // 2, text)
-            painter.restore()
-
-        painter.restore()
-
-        # Центральная ось
+        # Центральная ось (рисуется статично)
         painter.setBrush(QColor("#1e2328"))
         painter.setPen(QPen(QColor("#9ab"), 3))
         painter.drawEllipse(QPoint(center_x, center_y), 20, 20)
 
-        # Стрелка сверху
+        # Стрелка сверху (рисуется статично)
         painter.setBrush(QColor("#ffffff"))
         painter.setPen(QPen(QColor("#14181c"), 2))
         arrow = QPolygon([
@@ -147,35 +317,34 @@ class WheelWidget(QWidget):
         if not self.current_slots: return
         
         display_count = len(self.current_slots)
-        
-        # Шаг 1: Выбираем случайного победителя ТОЛЬКО из тех, кто на колесе
         winner_index = random.randint(0, display_count - 1)
         self.winner_title = self.current_slots[winner_index]
 
-        # Шаг 2: Математически выверенный расчет угла остановки под стрелку (на 90 градусов)
         sector_angle = 360.0 / display_count
-        
-        # Центр сектора победителя в полярных координатах
         target_sector_center = winner_index * sector_angle + sector_angle / 2
         
-        # Корректируем смещение (90 градусов в Qt — это верх, а отсчет идет снизу вверх против часовой)
-        # Добавляем 1800 градусов (5 полных оборотов) для долгого кручения
-        final_angle = 270.0 - target_sector_center + 1800.0
+        # Рассчитываем количество полных оборотов в зависимости от длительности анимации,
+        # чтобы скорость вращения оставалась динамичной и естественной.
+        # На каждые 4.5 секунды берем около 5 оборотов (1800 градусов)
+        laps = max(2, int(self.spin_duration / 900))
+        final_angle = 270.0 - target_sector_center + (laps * 360.0)
         
         self.anim = QPropertyAnimation(self, b"rotation_angle")
-        self.anim.setDuration(4500) # 4.5 секунды кручения
+        self.anim.setDuration(self.spin_duration) # Адаптивное время прокрутки
         self.anim.setStartValue(self._rotation_angle % 360)
         self.anim.setEndValue(final_angle)
-        self.anim.setEasingCurve(QEasingCurve.Type.OutCubic) # Красивое затухание
+        
+        # QEasingCurve.Type.OutCubic обеспечивает идеальное физичное замедление в конце
+        self.anim.setEasingCurve(QEasingCurve.Type.OutCubic) 
         
         self.anim.finished.connect(self.on_spin_end)
         self.anim.start()
 
     def on_spin_end(self):
+        # Просто отправляем название победителя во всплывающее окно
         self.animation_finished.emit(self.winner_title)
-        
-        # Сразу после показа результата перемешиваем колесо заново из общего списка для следующего раунда
-        self.set_movies(self.movies)
+        # СТРОКА СВЕРХУ УДАЛЕНА. Колесо больше не будет сбрасывать свой состав после прокрутки.
+
 
 
 # 🧵 Класс-воркер для парсинга в отдельном фоновом потоке
@@ -270,7 +439,7 @@ class MainWindow(QMainWindow):
         # --- ЛЕВАЯ ПАНЕЛЬ ---
         side_panel = QWidget()
         side_panel.setFixedWidth(300)
-        side_layout = QVBoxLayout(side_panel)
+        side_layout = QVBoxLayout(side_panel) 
         side_layout.setContentsMargins(0, 0, 0, 0)
         
         manual_group = QGroupBox("Добавить фильм вручную")
@@ -291,10 +460,30 @@ class MainWindow(QMainWindow):
         
         list_group = QGroupBox("Фильмы в рулетке")
         list_layout = QVBoxLayout(list_group)
-        self.movies_list = QListWidget()
+
+        self.movies_list = DragListWidget()
+
+        # НОВАЯ ФИЧА: Поле динамического поиска
+        self.search_input = QLineEdit()
+        self.search_input.setPlaceholderText("Поиск по вотчлисту...")
+        self.search_input.setStyleSheet("""
+            QLineEdit { 
+                background-color: #1c252d; 
+                color: #fff; 
+                border: 1px solid #445566; 
+                border-radius: 4px; 
+                padding: 5px; 
+                margin-top: 5px; 
+                margin-bottom: 5px; 
+            }
+        """)
+
         self.spin_btn = QPushButton("КРУТИТЬ КОЛЕСО")
         self.spin_btn.setStyleSheet("background-color: #00c030; color: white; font-weight: bold; font-size: 14px; padding: 8px;")
+
+        # Располагаем строго по вашей логике: поиск находится между списком и кнопкой
         list_layout.addWidget(self.movies_list)
+        list_layout.addWidget(self.search_input) 
         list_layout.addWidget(self.spin_btn)
         
         side_layout.addWidget(manual_group)
@@ -304,13 +493,197 @@ class MainWindow(QMainWindow):
         # --- ПРАВАЯ ЗОНА ---
         self.wheel_area = WheelWidget()
         
+        # 1. Верхняя панель управления (Время прокрутки сверху справа)
+        top_control_panel = QWidget()
+        top_control_layout = QHBoxLayout(top_control_panel)
+        top_control_layout.setContentsMargins(10, 5, 10, 5)
+        
+        time_label = QLabel("Время прокрутки:")
+        time_label.setStyleSheet("color: #9ab; font-weight: bold;")
+        
+        self.time_input = QLineEdit()
+        self.time_input.setText("4.5")  # Дефолтное значение
+        self.time_input.setPlaceholderText("1-60")
+        self.time_input.setFixedWidth(60)
+        self.time_input.setStyleSheet("""
+            QLineEdit { 
+                background-color: #2c3440; 
+                color: #fff; 
+                border: 1px solid #445566; 
+                border-radius: 4px; 
+                padding: 4px; 
+                font-weight: bold;
+                text-align: center;
+            }
+        """)
+        
+        time_sec_label = QLabel("сек.")
+        time_sec_label.setStyleSheet("color: #9ab; font-weight: bold;")
+        
+        # ПРИМЕНЯЕМ СТРЕТЧ: сдвигаем элементы времени в самый правый край
+        top_control_layout.addStretch() 
+        top_control_layout.addWidget(time_label)
+        top_control_layout.addWidget(self.time_input)
+        top_control_layout.addWidget(time_sec_label)
+        
+        # 2. Нижняя панель управления (Ползунок количества слотов)
+        slider_group = QWidget()
+        slider_layout = QHBoxLayout(slider_group)
+        slider_layout.setContentsMargins(10, 0, 10, 10)
+        
+        self.size_label = QLabel("Слотов на колесе: 12")
+        self.size_slider = QSlider(Qt.Orientation.Horizontal)
+        self.size_slider.setRange(0, 50)  
+        self.size_slider.setValue(12)      
+        self.size_slider.setEnabled(False) 
+        
+        self.size_slider.setStyleSheet("""
+            QSlider::groove:horizontal { border: 1px solid #445566; height: 6px; background: #2c3440; border-radius: 3px; }
+            QSlider::handle:horizontal { background: #00c030; border: none; width: 16px; height: 16px; margin: -5px 0; border-radius: 8px; }
+            QSlider::handle:horizontal:hover { background: #00e5ff; }
+            QSlider::handle:horizontal:disabled { background: #445566; }
+        """)
+        
+        slider_layout.addWidget(self.size_label)
+        slider_layout.addWidget(self.size_slider)
+        
+        # 3. Собираем всю правую панель по вертикали (Топ-панель -> Колесо -> Слайдер)
+        right_panel = QWidget()
+        right_layout = QVBoxLayout(right_panel)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        
+        right_layout.addWidget(top_control_panel) # Поля времени теперь СВЕРХУ
+        right_layout.addWidget(self.wheel_area, stretch=1)
+        right_layout.addWidget(slider_group) 
+        
+        # 4. Добавляем готовые панели в главный горизонтальный слой
         main_layout.addWidget(side_panel)
-        main_layout.addWidget(self.wheel_area, stretch=1)
+        main_layout.addWidget(right_panel, stretch=2)
 
+        # ==========================================================
+        # СИГНАЛЫ 
+        # ==========================================================
+        # Логика кнопок управления
         self.add_manual_btn.clicked.connect(self.add_movie_manually)
         self.parse_btn.clicked.connect(self.start_async_parsing)
         self.spin_btn.clicked.connect(self.spin_the_wheel)
+        
+        # Логика взаимодействия с колесом
         self.wheel_area.animation_finished.connect(self.show_winner_popup)
+        self.movies_list.itemDoubleClicked.connect(self.handle_quick_delete)
+        
+        # Настройка и синхронизация ползунка количества слотов
+        self.size_slider.valueChanged.connect(self.handle_wheel_size_change)
+        self.wheel_area.pool_changed.connect(self.sync_interface_with_wheel)
+        
+        # Динамический поиск по вотчлисту
+        self.search_input.textChanged.connect(self.filter_movies_list)
+        
+        # Валидация времени прокрутки (ввод с клавиатуры)
+        self.time_input.editingFinished.connect(self.handle_time_input_change)
+        
+        # Инициализируем стартовое время при запуске приложения
+        self.handle_time_input_change()
+
+    def filter_movies_list(self, text):
+        """Динамически скрывает или показывает фильмы в зависимости от ввода"""
+        search_term = text.strip().lower() # Приводим к нижнему регистру для регистронезависимого поиска
+        
+        # Проходим циклом по всем элементам QListWidget
+        for i in range(self.movies_list.count()):
+            item = self.movies_list.item(i)
+            movie_title = item.text().lower()
+            
+            # Если поисковый запрос пустой ИЛИ название фильма содержит этот запрос
+            if not search_term or search_term in movie_title:
+                item.setHidden(False) # Показываем строку
+            else:
+                item.setHidden(True)  # Скрываем строку
+
+    def sync_interface_with_wheel(self, current_pool_size):
+        """Синхронизирует ползунок и UI при Drag'n'Drop изменениях на колесе"""
+        # Временно блокируем сигналы ползунка, чтобы не вызвать зацикливание обновления
+        self.size_slider.blockSignals(True)
+        
+        # Автоматически сдвигаем ползунок под реальное число секторов на колесе
+        self.size_slider.setValue(current_pool_size)
+        self.size_label.setText(f"Слотов на колесе: {current_pool_size}")
+        
+        # Если на колесо добавили первый фильм, активируем ползунок для управления
+        if current_pool_size > 0:
+            self.size_slider.setEnabled(True)
+            
+        self.size_slider.blockSignals(False)
+
+        # Проверяем левый список (на случай, если фильма там почему-то не было)
+        existing_items = [self.movies_list.item(i).text() for i in range(self.movies_list.count())]
+        for movie in self.wheel_area.current_slots:
+            if movie not in existing_items:
+                self.movies_list.addItem(movie)
+
+
+    # Добавляем внутрь класса MainWindow
+    def handle_quick_delete(self, item):
+        """Хендлер быстрого удаления фильма по двойному клику"""
+        movie_title = item.text()
+        
+        # Удаляем фильм из пула самого колеса (оно внутри перерисуется)
+        self.wheel_area.remove_slot_by_title(movie_title)
+        
+        # ИСПРАВЛЕНО: Удаляем элемент из правильного виджета списка
+        row = self.movies_list.row(item)
+        self.movies_list.takeItem(row)
+
+    def handle_wheel_size_change(self, value):
+        """Хендлер перемещения ползунка размера колеса"""
+        # 1. Обновляем текст счетчика рядом с ползунком
+        self.size_label.setText(f"Слотов на колесе: {value}")
+        
+        # 2. Передаем новый максимальный лимит в колесо
+        self.wheel_area.max_lots_limit = value
+        
+        # 3. Если в программе уже есть глобальный список фильмов (Watchlist)
+        if self.wheel_area.movies:
+            # Перевыбираем фильмы внутри колеса под новое количество слотов
+            self.wheel_area.set_movies(self.wheel_area.movies)
+            
+            # УДАЛЕНО: Мы больше не вызываем self.movies_list.clear()!
+            # Левый список сохраняет все загруженные фильмы в целости и сохранности.
+
+    def handle_time_input_change(self):
+        """Обрабатывает ввод времени вращения с клавиатуры и защищает от ошибок"""
+        raw_text = self.time_input.text().strip()
+        
+        # Заменяем запятую на точку на случай, если пользователь ввел "4,5" вместо "4.5"
+        raw_text = raw_text.replace(",", ".")
+        
+        try:
+            # Пытаемся преобразовать текст в число
+            seconds = float(raw_text)
+            
+            # Проверяем диапазон (вплоть до минуты = 60 секунд)
+            if seconds < 1.0:
+                QMessageBox.warning(self, "Внимание", "Минимальное время вращения — 1 секунда.")
+                seconds = 1.0
+                self.time_input.setText("1.0")
+            elif seconds > 60.0:
+                QMessageBox.warning(self, "Внимание", "Максимальное время вращения — 60 секунд (1 минута).")
+                seconds = 60.0
+                self.time_input.setText("60.0")
+                
+            # Передаем валидное значение в метод колеса
+            # Наш WheelWidget принимает секунды и переводит во внутренние миллисекунды
+            self.wheel_area.set_spin_duration(seconds)
+            
+        except ValueError:
+            # Если перевод в float упал (пользователь ввел буквы, пустую строку или спецсимволы)
+            QMessageBox.critical(self, "Ошибка ввода", "Введите корректное число секунд (например: 5 или 4.5)")
+            
+            # Сбрасываем интерфейс и логику на безопасное дефолтное значение
+            self.time_input.setText("4.5")
+            self.wheel_area.set_spin_duration(4.5)
+
+
 
     def add_movie_manually(self):
         movie_title = self.movie_input.text().strip()
@@ -331,7 +704,13 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Внимание", "Введите никнейм пользователя!")
             return
         
+        # 1. Меняем состояние и стиль кнопки перед стартом потока
         self.parse_btn.setEnabled(False)
+        self.parse_btn.setText("Инициализация...")
+        # Делаем кнопку серой, убираем эффект наведения (hover) на время загрузки
+        self.parse_btn.setStyleSheet("""
+            QPushButton { background-color: #2c3440; color: #556677; border: 1px solid #445566; }
+        """)
 
         # Создаем поток и объект-воркер
         self.thread = QThread()
@@ -353,27 +732,74 @@ class MainWindow(QMainWindow):
         self.thread.start()
 
     def update_parse_button_status(self, text):
+        # Метод будет выводить динамический статус из воркера (например: "Загрузка: стр. 1")
         self.parse_btn.setText(text)
 
     def handle_parse_error(self, error_msg):
         QMessageBox.critical(self, "Ошибка загрузки", error_msg)
         self.reset_parse_button()
-        self.thread.quit()
+        # Поток безопасно завершится сам благодаря коннектам в start_async_parsing,
+        # но при ошибке принудительно гасим его, если finished не вызвался
+        if self.thread.isRunning():
+            self.thread.quit()
 
     def handle_parse_success(self, movies_found):
+        # 1. Сразу полностью очищаем левый список на экране
+        self.search_input.clear() 
         self.movies_list.clear()
+        
         if movies_found:
-            self.movies_list.addItems(movies_found)
-            # Загружаем спарсенные фильмы в колесо
+            # Настраиваем максимальный диапазон ползунка под размер нового вотчлиста (но до 50)
+            max_available = min(50, len(movies_found))
+            self.size_slider.setRange(0, max_available)
+            
+            # Определяем начальное значение ползунка
+            start_val = min(12, max_available)
+            
+            # Временно блокируем сигналы, чтобы избежать двойного вызова тяжелой отрисовки
+            self.size_slider.blockSignals(True)
+            self.size_slider.setValue(start_val)
+            self.size_label.setText(f"Слотов на колесе: {start_val}")
+            self.size_slider.setEnabled(True)
+            self.size_slider.blockSignals(False)
+            
+            # Устанавливаем лимит лотов для колеса
+            self.wheel_area.max_lots_limit = start_val
+            
+            # КРИТИЧЕСКИЙ МОМЕНТ: Принудительно сбрасываем старый графический кэш колеса в None!
+            self.wheel_area.wheel_buffer = None
+            
+            # Передаем новый список фильмов в колесо (оно заново отрендерит QPixmap буфер)
             self.wheel_area.set_movies(movies_found)
-            QMessageBox.information(self, "Готово", f"Колесо заряжено!\nВсего фильмов: {len(movies_found)}")
+            
+            # Добавляем в левый текстовый список ВСЕ найденные фильмы нового пользователя
+            self.movies_list.addItems(movies_found) 
+            
+            QMessageBox.information(self, "Готово", f"Колесо заряжено!\nВсего загружено: {len(movies_found)}")
         else:
+            # Если вотчлист пуст, полностью обнуляем колесо
+            self.wheel_area.max_lots_limit = 0
+            self.wheel_area.wheel_buffer = None
+            self.wheel_area.set_movies([])
+            
+            self.size_slider.setRange(0, 0)
+            self.size_slider.setValue(0)
+            self.size_label.setText("Слотов на колесе: 0")
+            self.size_slider.setEnabled(False)
+            
             QMessageBox.information(self, "Информация", "Вотчлист пуст.")
+            
         self.reset_parse_button()
 
+
+
     def reset_parse_button(self):
+        # 2. Возвращаем кнопке её исходный текст, состояние и дефолтный стиль
         self.parse_btn.setText("Загрузить вотчлист")
         self.parse_btn.setEnabled(True)
+        # Сброс стилей на пустую строку вернет глобальный stylesheet приложения (из блока if __name__ == "__main__")
+        self.parse_btn.setStyleSheet("") 
+
 
     def spin_the_wheel(self):
         if self.movies_list.count() == 0:
