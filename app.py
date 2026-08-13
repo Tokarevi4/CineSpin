@@ -354,9 +354,11 @@ class WatchlistWorker(QObject):
     finished = Signal(list)     # Передает итоговый массив всех фильмов
     error = Signal(str)        # Передает сообщение об ошибке, если что-то пошло не так
 
-    def __init__(self, username):
+    # ИСПРАВЛЕНО: Добавлен именованный аргумент is_list_url
+    def __init__(self, username, is_list_url=False):
         super().__init__()
-        self.username = username
+        self.username = username  # В режиме списка здесь будет лежать полная ссылка
+        self.is_list_url = is_list_url
 
     def run(self):
         headers = {
@@ -367,23 +369,38 @@ class WatchlistWorker(QObject):
         movies_all = []
         page = 1
 
+        # Очищаем базовую ссылку от лишних слешей на конце для предсказуемой сборки пагинации
+        base_url = self.username.rstrip('/')
+
         while True:
-            # 📌 Безопасная сборка ссылки обычным сложением строк без urljoin
-            if page == 1:
-                url = f"https://letterboxd.com/{self.username}/watchlist/"
+            # Безопасная сборка URL в зависимости от режима (Вотчлист или Список)
+            if self.is_list_url:
+                if page == 1:
+                    url = f"{base_url}/"
+                else:
+                    url = f"{base_url}/page/{page}/"
             else:
-                url = f"https://letterboxd.com/{self.username}/watchlist/page/{page}/"
+                if page == 1:
+                    url = f"https://letterboxd.com/{self.username}/watchlist/"
+                else:
+                    url = f"https://letterboxd.com/{self.username}/watchlist/page/{page}/"
 
             try:
+                # Отправляем текущий статус на кнопку загрузки
+                self.progress.emit(f"Скачивание страницы {page}...")
                 response = requests.get(url, headers=headers, timeout=10)
                 
-                # Если страница не найдена, значит мы дошли до конца (или юзера нет)
+                # Если страница не найдена, значит мы дошли до конца (или юзера/списка нет)
                 if response.status_code == 404:
                     if page == 1:
-                        self.error.emit(f"Пользователь '{self.username}' не найден!")
+                        # Адаптируем ошибку под открытую вкладку
+                        if self.is_list_url:
+                            self.error.emit("Список не найден! Проверьте правильность ссылки.")
+                        else:
+                            self.error.emit(f"Пользователь '{self.username}' не найден!")
                         return
                     else:
-                        break # Просто закончили пагинацию
+                        break # Просто закончили пагинацию страниц
                 elif response.status_code != 200:
                     self.error.emit(f"Ошибка сервера Letterboxd (Код: {response.status_code})")
                     return
@@ -421,6 +438,7 @@ class WatchlistWorker(QObject):
         # Удаляем дубликаты с сохранением порядка
         movies_all = list(dict.fromkeys(movies_all))
         self.finished.emit(movies_all)
+
 
 
 class MainWindow(QMainWindow):
@@ -502,10 +520,19 @@ class MainWindow(QMainWindow):
         self.multi_username_input = QLineEdit()
         self.multi_username_input.setPlaceholderText("Никнеймы через запятую (user1, user2)...")
         multi_layout.addWidget(self.multi_username_input)
+
+        # Вкладка 3: Публичные списки
+        list_url_tab = QWidget()
+        list_url_layout = QVBoxLayout(list_url_tab)
+        list_url_layout.setContentsMargins(10, 10, 10, 10)
+        self.list_url_input = QLineEdit()
+        self.list_url_input.setPlaceholderText("Ссылка на список Letterboxd...")
+        list_url_layout.addWidget(self.list_url_input)
         
         # Добавляем вкладки в QTabWidget
         self.import_tabs.addTab(single_tab, "Один")
         self.import_tabs.addTab(multi_tab, "Несколько")
+        self.import_tabs.addTab(list_url_tab, "Списки") 
         
         # Общая кнопка загрузки под вкладками
         self.parse_btn = QPushButton("Загрузить вотчлист")
@@ -738,76 +765,82 @@ class MainWindow(QMainWindow):
 
     # 🛠 ЗАПУСК ФОНОВОГО ПОТОКА ДЛЯ ПАРСИНГА
     def start_async_parsing(self):
-        # Проверяем, какая вкладка активна: 0 - Соло, 1 - Кооператив
         current_tab_index = self.import_tabs.currentIndex()
+        is_list_url = False
         
         if current_tab_index == 0:
-            # --- ЛОГИКА СОЛО РЕЖИМА ---
+            # Режим "Один"
             username = self.username_input.text().strip()
             if not username:
                 QMessageBox.warning(self, "Внимание", "Введите никнейм пользователя!")
                 return
             self.users_to_parse = [username]
-        else:
-            # --- ЛОГИКА КООПЕРАТИВА ---
+            
+        elif current_tab_index == 1:
+            # Режим "Несколько"
             raw_input = self.multi_username_input.text().strip()
             if not raw_input:
                 QMessageBox.warning(self, "Внимание", "Введите никнеймы через запятую!")
                 return
-            # Разделяем строку по запятым, убираем пробелы и пустые элементы
             self.users_to_parse = [u.strip() for u in raw_input.split(",") if u.strip()]
             if len(self.users_to_parse) < 2:
                 QMessageBox.warning(self, "Внимание", "Для кооператива нужно минимум 2 пользователя!")
                 return
+                
+        else:
+            # --- РЕЖИМ СВИСКА ПО ССЫЛКЕ ---
+            url = self.list_url_input.text().strip()
+            if not url:
+                QMessageBox.warning(self, "Внимание", "Вставьте ссылку на список Letterboxd!")
+                return
+            if "://letterboxd.com" not in url or "/list/" not in url:
+                QMessageBox.warning(self, "Ошибка ссылки", "Ссылка должна вести на список Letterboxd (содержать /list/)!")
+                return
+                
+            self.users_to_parse = [url]
+            is_list_url = True
 
-        # Хранилище для накопления результатов
         self.multi_parsed_results = []
         self.current_user_index = 0
         
-        # Меняем визуальное состояние кнопки
         self.parse_btn.setEnabled(False)
         self.parse_btn.setStyleSheet("background-color: #2c3440; color: #556677; font-weight: bold;")
         
-        # Запускаем цепочку скачивания
-        self.parse_next_user()
+        self.parse_next_user(is_list_url)
 
-    def parse_next_user(self):
-        """Вспомогательный метод для асинхронного скачивания пользователей по очереди"""
+    def parse_next_user(self, is_list_url=False):
         if self.current_user_index < len(self.users_to_parse):
-            target_user = self.users_to_parse[self.current_user_index]
-            self.parse_btn.setText(f"Скачивание {target_user}...")
+            target = self.users_to_parse[self.current_user_index]
             
-            # Создаем поток и воркер
+            if is_list_url:
+                self.parse_btn.setText("Скачивание списка...")
+            else:
+                self.parse_btn.setText(f"Скачивание {target}...")
+            
             self.thread = QThread()
-            self.worker = WatchlistWorker(target_user)
+            # Передаем флаг в воркер
+            self.worker = WatchlistWorker(target, is_list_url=is_list_url)
             self.worker.moveToThread(self.thread)
 
             self.thread.started.connect(self.worker.run)
             self.worker.progress.connect(self.update_parse_button_status)
             self.worker.error.connect(self.handle_parse_error)
-            
-            # 1. Сначала сохраняем результат воркера в память
             self.worker.finished.connect(self.handle_single_user_success)
             
-            # 2. По окончании работы воркер командует потоку закрыться
             self.worker.finished.connect(self.thread.quit)
             self.worker.finished.connect(self.worker.deleteLater)
             
-            # 3. КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Переходим к следующему юзеру ТОЛЬКО когда 
-            # предыдущий системный поток ПОЛНОСТЬЮ закрылся и очистил память!
-            self.thread.finished.connect(self.on_current_thread_fully_stopped)
+            # Используем lambda, чтобы безопасно передать флаг в метод остановки потока
+            self.thread.finished.connect(lambda: self.on_current_thread_fully_stopped(is_list_url))
             self.thread.finished.connect(self.thread.deleteLater)
 
             self.thread.start()
         else:
-            # Все пользователи успешно скачаны и все потоки закрыты
             self.finalize_multiplayer_intersection()
 
-    def on_current_thread_fully_stopped(self):
-        """Срабатывает, когда старый QThread полностью уничтожен операционной системой"""
-        # Переходим к следующему индексу и безопасно создаем НОВЫЙ поток
+    def on_current_thread_fully_stopped(self, is_list_url):
         self.current_user_index += 1
-        self.parse_next_user()
+        self.parse_next_user(is_list_url)
 
 
     def handle_single_user_success(self, movies_found):
@@ -851,22 +884,17 @@ class MainWindow(QMainWindow):
 
 
     def handle_parse_success(self, movies_found):
-        self.search_input.clear() 
+        self.search_input.clear()
+        self.list_url_input.clear()
         self.movies_list.clear()
         
         if movies_found:
-            # 1. Рассчитываем реальный максимум для ползунка под этот список
             max_available = min(50, len(movies_found))
-            
-            # 2. Выставляем начальное значение (12 или сколько доступно)
             start_val = min(12, max_available)
             
-            # ВАЖНО: Принудительно выставляем новый лимит в само колесо ДО того, 
-            # как дернем ползунок, чтобы колесо не зажималось старыми лимитами!
             self.wheel_area.max_lots_limit = start_val
             self.wheel_area.wheel_buffer = None
             
-            # 3. Синхронизируем ползунок (блокируем сигналы, чтобы избежать каскадных перезаписей)
             self.size_slider.blockSignals(True)
             self.size_slider.setRange(0, max_available)
             self.size_slider.setValue(start_val)
@@ -874,13 +902,21 @@ class MainWindow(QMainWindow):
             self.size_slider.setEnabled(True)
             self.size_slider.blockSignals(False)
             
-            # 4. Заполняем левый список всеми найденными фильмами
             self.movies_list.addItems(movies_found) 
-            
-            # 5. Заряжаем колесо (теперь оно возьмет ровно start_val случайных фильмов из всего пула)
             self.wheel_area.set_movies(movies_found)
             
-            QMessageBox.information(self, "Готово", f"Колесо заряжено!\nВсего пересечений (И): {len(movies_found)}")
+            # --- ИСПРАВЛЕНИЕ: Динамический текст уведомления в зависимости от вкладки ---
+            current_tab = self.import_tabs.currentIndex()
+            if current_tab == 0:
+                msg_text = f"Колесо заряжено!\nВсего загружено из вотчлиста: {len(movies_found)}"
+            elif current_tab == 1:
+                msg_text = f"Колесо заряжено!\nВсего пересечений: {len(movies_found)}"
+            else:
+                msg_text = f"Колесо заряжено!\nВсего загружено из списка: {len(movies_found)}"
+                
+            QMessageBox.information(self, "Готово", msg_text)
+            # ----------------=========================================================
+            
         else:
             self.wheel_area.max_lots_limit = 0
             self.wheel_area.wheel_buffer = None
@@ -893,9 +929,17 @@ class MainWindow(QMainWindow):
             self.size_slider.setEnabled(False)
             self.size_slider.blockSignals(False)
             
-            QMessageBox.information(self, "Информация", "Общих фильмов не найдено.")
+            # Динамический текст ошибки для пустых результатов
+            current_tab = self.import_tabs.currentIndex()
+            if current_tab == 1:
+                QMessageBox.information(self, "Информация", "Общих фильмов не найдено.")
+            elif current_tab == 2:
+                QMessageBox.information(self, "Информация", "В указанном списке нет фильмов.")
+            else:
+                QMessageBox.information(self, "Информация", "Вотчлист пуст.")
             
         self.reset_parse_button()
+
 
     def reset_parse_button(self):
         # 2. Возвращаем кнопке её исходный текст, состояние и дефолтный стиль
