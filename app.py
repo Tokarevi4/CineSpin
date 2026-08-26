@@ -323,31 +323,37 @@ class WheelWidget(QWidget):
         sector_angle = 360.0 / display_count
         target_sector_center = winner_index * sector_angle + sector_angle / 2
         
-        # Рассчитываем количество полных оборотов в зависимости от длительности анимации,
-        # чтобы скорость вращения оставалась динамичной и естественной.
-        # На каждые 4.5 секунды берем около 5 оборотов (1800 градусов)
-        laps = max(2, int(self.spin_duration / 900))
-        final_angle = 270.0 - target_sector_center + (laps * 360.0)
+        # 📌 Читаем сохраненную переменную из self.spin_duration (если ее нет, ставим 4500 мс)
+        duration_ms = getattr(self, 'spin_duration', 4500)
+        
+        # Переводим обратно в секунды для расчета динамического количества оборотов
+        duration_seconds = duration_ms / 1000.0
+        
+        # 🚀 Масштабируем скорость: 2 полных оборота за каждую секунду времени вращения.
+        # При 5 секундах будет 10 кругов, при 30 секундах — 60 кругов. 
+        # Колесо всегда будет крутиться бешено и затормозит строго на последних 15-20% времени!
+        total_rotations = int(duration_seconds * 2)
+        
+        final_angle = 270.0 - target_sector_center + (total_rotations * 360.0)
         
         self.anim = QPropertyAnimation(self, b"rotation_angle")
-        self.anim.setDuration(self.spin_duration) # Адаптивное время прокрутки
+        
+        # 📌 ПЕРЕДАЕМ ДИНАМИЧЕСКОЕ ВРЕМЯ В АНИМАТОР
+        self.anim.setDuration(duration_ms) 
+        
         self.anim.setStartValue(self._rotation_angle % 360)
         self.anim.setEndValue(final_angle)
-        
-        # QEasingCurve.Type.OutCubic обеспечивает идеальное физичное замедление в конце
-        self.anim.setEasingCurve(QEasingCurve.Type.OutCubic) 
+        self.anim.setEasingCurve(QEasingCurve.Type.OutQuint) # Экспоненциальное торможение
         
         self.anim.finished.connect(self.on_spin_end)
         self.anim.start()
 
+
     def on_spin_end(self):
         # Просто отправляем название победителя во всплывающее окно
         self.animation_finished.emit(self.winner_title)
-        # СТРОКА СВЕРХУ УДАЛЕНА. Колесо больше не будет сбрасывать свой состав после прокрутки.
 
-
-
-# 🧵 Класс-воркер для парсинга в отдельном фоновом потоке
+# Класс-воркер для парсинга в отдельном фоновом потоке
 class WatchlistWorker(QObject):
     # Сигналы для передачи результатов обратно в главный поток UI
     progress = Signal(str)      # Передает текст статуса (например, "Скачиваю страницу 2...")
@@ -444,7 +450,7 @@ class WatchlistWorker(QObject):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Letterboxd Roulette")
+        self.setWindowTitle("CineSpin")
         self.resize(900, 600)
         
         main_widget = QWidget()
@@ -512,6 +518,7 @@ class MainWindow(QMainWindow):
         self.username_input = QLineEdit()
         self.username_input.setPlaceholderText("Никнейм пользователя...")
         single_layout.addWidget(self.username_input)
+        single_layout.addStretch()
         
         # Вкладка 2: Мультиплеер (Пересечение)
         multi_tab = QWidget()
@@ -520,6 +527,7 @@ class MainWindow(QMainWindow):
         self.multi_username_input = QLineEdit()
         self.multi_username_input.setPlaceholderText("Никнеймы через запятую (user1, user2)...")
         multi_layout.addWidget(self.multi_username_input)
+        single_layout.addStretch()
 
         # Вкладка 3: Публичные списки
         list_url_tab = QWidget()
@@ -528,6 +536,7 @@ class MainWindow(QMainWindow):
         self.list_url_input = QLineEdit()
         self.list_url_input.setPlaceholderText("Ссылка на список Letterboxd...")
         list_url_layout.addWidget(self.list_url_input)
+        single_layout.addStretch()
         
         # Добавляем вкладки в QTabWidget
         self.import_tabs.addTab(single_tab, "Один")
@@ -552,9 +561,9 @@ class MainWindow(QMainWindow):
         list_layout.addWidget(self.search_input) 
         list_layout.addWidget(self.spin_btn)
         
-        side_layout.addWidget(manual_group)
-        side_layout.addWidget(parser_group)
-        side_layout.addWidget(list_group)
+        side_layout.addWidget(manual_group, stretch=0)
+        side_layout.addWidget(parser_group, stretch=0)
+        side_layout.addWidget(list_group, stretch=1)
         
         # --- ПРАВАЯ ЗОНА ---
         self.wheel_area = WheelWidget()
@@ -748,8 +757,6 @@ class MainWindow(QMainWindow):
             # Сбрасываем интерфейс и логику на безопасное дефолтное значение
             self.time_input.setText("4.5")
             self.wheel_area.set_spin_duration(4.5)
-
-
 
     def add_movie_manually(self):
         movie_title = self.movie_input.text().strip()
@@ -953,8 +960,10 @@ class MainWindow(QMainWindow):
         if self.movies_list.count() == 0:
             QMessageBox.warning(self, "Внимание", "Сначала добавьте фильмы!")
             return
-        self.spin_btn.setEnabled(False) # Выключаем кнопку на время кручения
-        self.wheel_area.spin()
+        self.spin_btn.setEnabled(False)
+        
+        self.wheel_area.spin() 
+
 
 
     def fetch_movie_poster(self, movie_title):
